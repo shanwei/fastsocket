@@ -40,7 +40,7 @@ MODULE_AUTHOR("Xiaofeng Lin <sina.com.cn>");
 MODULE_VERSION("1.0.0");
 MODULE_DESCRIPTION("Fastsocket which provides scalable and thus high kernel performance for socket applications");
 
-static int enable_fastsocket_debug = 3;
+int enable_fastsocket_debug = 3;
 static int enable_listen_spawn = 2;
 extern int enable_receive_flow_deliver;
 static int enable_fast_epoll = 1;
@@ -64,11 +64,6 @@ MODULE_PARM_DESC(enable_fast_epoll, " Control Fast-Epoll: 0 = Disabled, 1 = Enab
 MODULE_PARM_DESC(enable_direct_tcp, " Control Direct-TCP: 0 = Disbale[Default], 1 = Enabled");
 MODULE_PARM_DESC(enable_skb_pool, " Control Skb-Pool: 0 = Disbale[Default], 1 = Receive skb pool, 2 = Send skb pool,  3 = Both skb pool");
 MODULE_PARM_DESC(enable_receive_cpu_selection, " Control RCS: 0 = Disabled[Default], 1 = Enabled");
-
-int inline fsocket_get_dbg_level(void)
-{
-	return enable_fastsocket_debug;
-}
 
 #define DISABLE_LISTEN_SPAWN			0
 #define ENABLE_LISTEN_SPAWN_REQUIRED_AFFINITY	1
@@ -698,6 +693,14 @@ static int fsocket_spawn_clone(int fd, struct socket *oldsock, struct socket **n
 		goto out;
 	}
 
+	err = security_socket_post_create(sock, PF_INET, SOCK_STREAM, IPPROTO_TCP, 0);
+	if (err) {
+		EPRINTK_LIMIT(ERR, "security_socket_post_create failed\n");
+		put_empty_filp(sfile);
+		fsock_free_sock(sock);
+		goto out;
+	}
+
 	sock->sk->sk_local = -1;
 
 	fsocket_copy_socket(oldsock, sock);
@@ -791,6 +794,7 @@ out:
 static int fsocket_socket(int flags)
 {
 	struct socket *sock;
+	int fd;
 
 	int err = 0;
 
@@ -817,13 +821,20 @@ static int fsocket_socket(int flags)
 
 	fsocket_init_socket(sock);
 
-	err = fsock_map_fd(sock, flags);
-	if (err < 0) {
+	fd = fsock_map_fd(sock, flags);
+	if (fd < 0) {
+		err = fd;
 		EPRINTK_LIMIT(ERR, "Map Socket FD failed\n");
 		goto release_sock;
 	}
 
-	goto out;
+	err = security_socket_post_create(sock, PF_INET, SOCK_STREAM, IPPROTO_TCP, 0);
+	if (err) {
+		EPRINTK_LIMIT(ERR, "security_socket_post_create failed\n");
+		goto release_sock;
+	}
+
+	return fd;
 
 release_sock:
 	fsock_release_sock(sock);
@@ -1173,7 +1184,7 @@ static int fsocket_spawn(struct file *filp, int fd, int tcpu)
 	}
 
 	cpu = ret;
-
+	newsock = NULL;
 	ret = fsocket_spawn_clone(fd, sock, &newsock);
 	if (ret < 0) {
 		EPRINTK_LIMIT(ERR, "Clone listen socket failed[%d]\n", ret);
@@ -1355,6 +1366,10 @@ static int fsocket_accept(struct file *file , struct sockaddr __user *upeer_sock
 		fsock_free_sock(newsock);
 		goto out;
 	}
+
+	err = security_socket_accept(sock, newsock);
+	if (err)
+		goto out;
 
 	if (!file->sub_file) {
 		DPRINTK(DEBUG, "File 0x%p has no sub file, Do common accept\n", file);
